@@ -27,3 +27,5 @@ option('enable-usdt', type : 'boolean', value : false,
 
 option('enable-io-uring', type: 'boolean', value: true,
        description: 'Enable fuse-over-io-uring support')
+
+option('enable-native', type: 'boolean', value: true, description: 'Optimize for current CPU architecture')

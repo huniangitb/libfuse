@@ -1,3 +1,5 @@
+#define PTHREAD_CANCEL_ENABLE 0
+#define PTHREAD_CANCEL_DISABLE 1
 /*
   FUSE: Filesystem in Userspace
   Copyright (C) 2001-2007  Miklos Szeredi <miklos@szeredi.hu>
@@ -48,7 +50,7 @@ struct fuse_worker {
 	pthread_t thread_id;
 
 	// We need to include fuse_buf so that we can properly free
-	// it when a thread is terminated by pthread_cancel().
+	// it when a thread is terminated by ////pthread_cancel().
 	struct fuse_buf fbuf;
 	struct fuse_chan *ch;
 	struct fuse_mt *mt;
@@ -138,9 +140,9 @@ static void *fuse_do_work(void *data)
 		int isforget = 0;
 		int res;
 
-		pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
+		////pthread_setcancelstate(PTHREAD_CANCEL_ENABLE, NULL);
 		res = fuse_session_receive_buf_internal(se, &w->fbuf, w->ch);
-		pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
+		////pthread_setcancelstate(PTHREAD_CANCEL_DISABLE, NULL);
 		if (res == -EINTR)
 			continue;
 		if (res <= 0) {
@@ -408,7 +410,7 @@ int err;
 
 		pthread_mutex_lock(&se->mt_lock);
 		for (w = mt.main.next; w != &mt.main; w = w->next)
-			pthread_cancel(w->thread_id);
+			////pthread_cancel(w->thread_id);
 		pthread_mutex_unlock(&se->mt_lock);
 
 		while (mt.main.next != &mt.main)

@@ -1,3 +1,4 @@
+#include <malloc.h>
 /*
   FUSE: Filesystem in Userspace
   Copyright (C) 2001-2007  Miklos Szeredi <miklos@szeredi.hu>
@@ -10,7 +11,9 @@
 */
 
 #define _GNU_SOURCE
-
+#include <fcntl.h>
+#include <unistd.h>
+int pipe2(int fds[2], int flags);
 #include "fuse_config.h"
 #include "fuse_i.h"
 #include "fuse_kernel.h"
@@ -3870,7 +3873,7 @@ static void *buf_alloc(size_t size, bool internal)
 					 sizeof(struct fuse_write_in);
 		size_t new_size = ROUND_UP(size + write_header_sz, pagesize);
 
-		char *buf = aligned_alloc(pagesize, new_size);
+		char *buf = memalign(pagesize, new_size);
 		if (buf == NULL)
 			return NULL;
 

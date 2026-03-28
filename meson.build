@@ -2,7 +2,7 @@ project('libfuse3', ['c'],
         version: '3.18.1',
         meson_version: '>= 0.60.0',
         default_options: [
-            'buildtype=debugoptimized',
+            'buildtype=release',
             'c_std=gnu11',
             'cpp_std=c++20',
             'warning_level=2',
@@ -190,6 +190,14 @@ add_project_arguments('-D_REENTRANT', '-DHAVE_LIBFUSE_PRIVATE_CONFIG_H', '-D_GNU
                      '-Wno-sign-compare', '-Wmissing-declarations',
                      '-Wwrite-strings', '-fno-strict-aliasing', language: 'cpp')
 
+# Native optimization (Option 3)
+if get_option('enable-native')
+    native_flags = ['-march=native', '-mtune=native']
+    # Check if compiler supports these flags before adding
+    add_project_arguments(cc.get_supported_arguments(native_flags), language: ['c', 'cpp'])
+    message('Native CPU optimization enabled')
+endif
+
 # Some (stupid) GCC versions warn about unused return values even when they are
 # casted to void. This makes -Wunused-result pretty useless, since there is no
 # way to suppress the warning when we really *want* to ignore the value.
@@ -329,4 +337,3 @@ endif
 foreach n : subdirs
     subdir(n)
 endforeach
-
