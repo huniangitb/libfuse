@@ -15,6 +15,8 @@
 
 #include "fuse_config.h"
 #include "fuse_i.h"
+
+#define READDIR_BUF 32768
 #include "fuse_lowlevel.h"
 #include "fuse_opt.h"
 #include "fuse_misc.h"
@@ -188,7 +190,6 @@ struct fuse_dh {
 
 struct fuse_context_i {
 	struct fuse_context ctx;
-	fuse_req_t req;
 };
 
 /* Defined by FUSE_REGISTER_MODULE() in lib/modules/subdir.c and iconv.c.  */
@@ -2578,7 +2579,7 @@ static struct fuse *req_fuse_prepare(fuse_req_t req)
 {
 	struct fuse_context_i *c = fuse_create_context(req_fuse(req));
 	const struct fuse_ctx *ctx = fuse_req_ctx(req);
-	c->req = req;
+	c->ctx.req = req;
 	c->ctx.uid = ctx->uid;
 	c->ctx.gid = ctx->gid;
 	c->ctx.pid = ctx->pid;
@@ -2628,6 +2629,10 @@ static void fuse_lib_init(void *data, struct fuse_conn_info *conn)
 
 	fuse_create_context(f);
 	fuse_set_feature_flag(conn, FUSE_CAP_EXPORT_SUPPORT);
+
+	/* Expose /dev/fuse fd for passthrough ioctl detection */
+	conn->fd = f->se ? f->se->fd : -1;
+
 	fuse_fs_init(f->fs, conn, &f->conf);
 
 	if (f->conf.intr) {
@@ -2701,6 +2706,12 @@ static void fuse_lib_lookup(fuse_req_t req, fuse_ino_t parent,
 			e.entry_timeout = f->conf.negative_timeout;
 			err = 0;
 		}
+		if (err == 0 && e.ino != 0 && f->fs->op.bpf_setup) {
+			int bpf_err = f->fs->op.bpf_setup(path, &e);
+			if (f->conf.debug)
+				fuse_log(FUSE_LOG_DEBUG, "BPF: bpf_setup(%s) = %d\n",
+					 path, bpf_err);
+		}
 		fuse_finish_interrupt(f, req, &d);
 		free_path(f, parent, path);
 	}
@@ -2710,6 +2721,66 @@ static void fuse_lib_lookup(fuse_req_t req, fuse_ino_t parent,
 		pthread_mutex_unlock(&f->lock);
 	}
 	reply_entry(req, &e, err);
+}
+
+static void fuse_lib_lookup_postfilter(fuse_req_t req, fuse_ino_t parent,
+                                        uint32_t error_in, const char *name,
+                                        struct fuse_entry_out *feo,
+                                        struct fuse_entry_bpf_out *febo)
+{
+	struct fuse *f = req_fuse(req);
+	(void)f;
+	(void)parent;
+	(void)name;
+
+	if (f->conf.debug)
+		fuse_log(FUSE_LOG_DEBUG, "BPF: lookup_postfilter %llu/%s err=%u\n",
+			 (unsigned long long)parent, name, error_in);
+
+	/* Forward the original BPF result back to the kernel.
+	 * The calling process's uid/gid have already been checked
+	 * by the BPF program itself -- if we reach here, the kernel
+	 * has delegated the decision to userspace.  We accept the
+	 * result as-is for now (full access control can be added
+	 * later via a bpf_postfilter callback in fuse_operations). */
+	struct {
+		struct fuse_entry_out feo;
+		struct fuse_entry_bpf_out febo;
+	} buf = {*feo, *febo};
+	fuse_reply_buf(req, (const char *)&buf, sizeof(buf));
+}
+
+static void fuse_lib_readdir_postfilter(fuse_req_t req, fuse_ino_t ino,
+					 uint32_t error_in, off_t off_in,
+					 off_t off_out, size_t size_out,
+					 const void *dirents_in,
+					 struct fuse_file_info *fi)
+{
+	struct fuse *f = req_fuse(req);
+	(void)f;
+	(void)ino;
+	(void)error_in;
+	(void)off_in;
+	(void)fi;
+
+	if (f->conf.debug)
+		fuse_log(FUSE_LOG_DEBUG, "BPF: readdir_postfilter ino=%llu\n",
+			 (unsigned long long)ino);
+
+	/* For now, forward all entries as-is.  The readdir filter
+	 * can be customized later via fuse_operations callback. */
+	char buf[READDIR_BUF];
+	struct fuse_read_out *fro = (struct fuse_read_out *)buf;
+	char *dirents_out = (char *)(fro + 1);
+	size_t copy_size = (size_out < sizeof(buf) - sizeof(*fro))
+			   ? size_out : (sizeof(buf) - sizeof(*fro));
+	if (copy_size > 0 && dirents_in)
+		memcpy(dirents_out, dirents_in, copy_size);
+	*fro = (struct fuse_read_out){
+		.offset = (uint64_t)off_out,
+		.again = 0,
+	};
+	fuse_reply_buf(req, buf, sizeof(*fro) + copy_size);
 }
 
 static void do_forget(struct fuse *f, fuse_ino_t ino, uint64_t nlookup)
@@ -3664,6 +3735,9 @@ static int readdir_fill(struct fuse *f, fuse_req_t req, fuse_ino_t ino,
 		err = fuse_fs_readdir(f->fs, path, dh, filler, off, fi, flags);
 		fuse_finish_interrupt(f, req, &d);
 		dh->req = NULL;
+		if (f->conf.debug)
+			fuse_log(FUSE_LOG_DEBUG, "READDIR_FILL_DONE err=%d dh_err=%d filled=%d\n",
+				 err, dh->error, dh->filled);
 		if (!err)
 			err = dh->error;
 		if (err)
@@ -4525,6 +4599,7 @@ static struct fuse_lowlevel_ops fuse_path_ops = {
 	.init = fuse_lib_init,
 	.destroy = fuse_lib_destroy,
 	.lookup = fuse_lib_lookup,
+	.lookup_postfilter = fuse_lib_lookup_postfilter,
 	.forget = fuse_lib_forget,
 	.forget_multi = fuse_lib_forget_multi,
 	.getattr = fuse_lib_getattr,
@@ -4548,6 +4623,7 @@ static struct fuse_lowlevel_ops fuse_path_ops = {
 	.opendir = fuse_lib_opendir,
 	.readdir = fuse_lib_readdir,
 	.readdirplus = fuse_lib_readdirplus,
+	.readdirpostfilter = fuse_lib_readdir_postfilter,
 	.releasedir = fuse_lib_releasedir,
 	.fsyncdir = fuse_lib_fsyncdir,
 	.statfs = fuse_lib_statfs,
@@ -4713,7 +4789,7 @@ int fuse_getgroups(int size, gid_t list[])
 	if (!c)
 		return -EINVAL;
 
-	return fuse_req_getgroups(c->req, size, list);
+	return fuse_req_getgroups(c->ctx.req, size, list);
 }
 
 int fuse_interrupted(void)
@@ -4721,7 +4797,7 @@ int fuse_interrupted(void)
 	struct fuse_context_i *c = fuse_get_context_internal();
 
 	if (c)
-		return fuse_req_interrupted(c->req);
+		return fuse_req_interrupted(c->ctx.req);
 	else
 		return 0;
 }

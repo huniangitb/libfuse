@@ -102,6 +102,13 @@ struct fuse_entry_param {
 	    that come through the kernel, this should be set to a very
 	    large value. */
 	double entry_timeout;
+
+		/** Passthrough / BPF backing info for this entry */
+		uint64_t	backing_action;
+		uint64_t	backing_fd;
+		uint64_t	bpf_action;
+		uint64_t	bpf_fd;
+
 };
 
 /**
@@ -171,6 +178,13 @@ enum fuse_notify_entry_flags {
 #define FUSE_SET_ATTR_OPEN	(1 << 15)
 #define FUSE_SET_ATTR_TIMES_SET	(1 << 16)
 #define FUSE_SET_ATTR_TOUCH	(1 << 17)
+
+/* Forward declarations for kernel structs */
+struct fuse_entry_out;
+struct fuse_entry_bpf_out;
+
+ 
+
 
 /* ----------------------------------------------------------- *
  * Request methods and replies				       *
@@ -250,6 +264,24 @@ struct fuse_lowlevel_ops {
 	 */
 	void (*lookup) (fuse_req_t req, fuse_ino_t parent, const char *name);
 
+	/**
+	 * post filter a lookup
+	 *
+	 * Valid replies:
+	 *   fuse_reply_entry
+	 *   fuse_reply_err
+	 *
+	 * @param req request handle
+	 * @param parent inode number of the parent directory
+	 * @param error_in the error, or 0, of the lookup
+	 * @param name the name that was looked up
+	 * @param feo the fuse entry out struct from the lookup
+	 * @param febo the fuse entry bpf out struct from the lookup
+	 */
+	void (*lookup_postfilter)(fuse_req_t req, fuse_ino_t parent,
+				uint32_t error_in, const char *name,
+				struct fuse_entry_out *feo,
+				struct fuse_entry_bpf_out *febo);
 	/**
 	 * Forget about an inode
 	 *
@@ -358,6 +390,18 @@ struct fuse_lowlevel_ops {
 	 * @param ino the inode number
 	 */
 	void (*readlink) (fuse_req_t req, fuse_ino_t ino);
+
+	/**
+	 * Return canonical path for inotify
+	 *
+	 * Valid replies:
+	 *   fuse_reply_canonical_path
+	 *   fuse_reply_err
+	 *
+	 * @param req request handle
+	 * @param ino the inode number
+	 */
+	void (*canonical_path) (fuse_req_t req, fuse_ino_t ino);
 
 	/**
 	 * Create file node
@@ -781,6 +825,26 @@ struct fuse_lowlevel_ops {
 	 */
 	void (*readdir) (fuse_req_t req, fuse_ino_t ino, size_t size, off_t off,
 			 struct fuse_file_info *fi);
+	/**
+	 * Read directory postfilter
+	 *
+	 * Valid replies:
+	 *   fuse_reply_buf
+	 *   fuse_reply_data
+	 *   fuse_reply_err
+	 *
+	 * @param req request handle
+	 * @param ino the inode number
+	 * @param error_in the error from the readdir
+	 * @param off_in offset to continue reading the directory stream before backing
+	 * @param off_out offset to continue reading the directory stream after backing
+	 * @param size_out length in bytes of dirents
+	 * @param dirents array of dirents read by backing
+	 * @param fi file information
+	 */
+	void (*readdirpostfilter)(fuse_req_t req, fuse_ino_t ino, uint32_t error_in,
+				off_t off_in, off_t off_out, size_t size_out,
+				const void *dirents, struct fuse_file_info *fi);
 
 	/**
 	 * Release an open directory
@@ -1441,6 +1505,18 @@ int fuse_reply_attr(fuse_req_t req, const struct stat *attr,
 int fuse_reply_readlink(fuse_req_t req, const char *link);
 
 /**
+ * Reply with the canonical path for inotify
+ *
+ * Possible requests:
+ *   canonical_path
+ *
+ * @param req request handle
+ * @param path to canonicalize
+ * @return zero for success, -errno for failure to send reply
+ */
+int fuse_reply_canonical_path(fuse_req_t req, const char *path);
+
+/**
  * Setup passthrough backing file for open reply
  *
  * Currently there should be only one backing id per node / backing file.
@@ -1454,6 +1530,18 @@ int fuse_reply_readlink(fuse_req_t req, const char *link);
  */
 int fuse_passthrough_open(fuse_req_t req, int fd);
 int fuse_passthrough_close(fuse_req_t req, int backing_id);
+
+/**
+ * Enable passthrough for a file descriptor.
+ *
+ * This tries the upstream BACKING_OPEN ioctl first and falls back
+ * to Android V2/V1/V0 passthrough ioctls automatically.
+ *
+ * @param req request handle
+ * @param fd file descriptor to enable passthrough for
+ * @return positive backing id on success, <=0 on error
+ */
+int fuse_passthrough_enable(fuse_req_t req, unsigned int fd);
 
 /**
  * Reply with open parameters

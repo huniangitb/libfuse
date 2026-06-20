@@ -99,7 +99,11 @@ struct fuse_file_info {
 	/** Padding.  Reserved for future use*/
 	uint32_t padding : 23;
 	uint32_t padding2 : 32;
-	uint32_t padding3 : 32;
+
+	/** Passthrough file handle id.  May be filled in by filesystem in
+	 * create and open.  It is used to create a passthrough connection
+	 * between FUSE file and backing file (Android passthrough path). */
+	uint32_t passthrough_fh;
 
 	/** File handle id.  May be filled in by filesystem in create,
 	 * open, and opendir().  Available in most other file operations on the
@@ -709,7 +713,13 @@ struct fuse_conn_info {
 	/**
 	 * For future use.
 	 */
-	uint16_t reserved[31];
+	uint16_t reserved[30];
+
+		/**
+		 * File descriptor for /dev/fuse device.
+		 * Filled in by libfuse before calling init().
+		 */
+		int fd;
 };
 
 struct fuse_session;

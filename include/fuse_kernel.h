@@ -486,7 +486,9 @@ struct fuse_file_lock {
 #define FUSE_CREATE_SUPP_GROUP	(1ULL << 34)
 #define FUSE_HAS_EXPIRE_ONLY	(1ULL << 35)
 #define FUSE_DIRECT_IO_ALLOW_MMAP (1ULL << 36)
-#define FUSE_PASSTHROUGH	(1ULL << 37)
+/* This kernel uses bit 31 for passthrough (custom Android position) */
+#define FUSE_PASSTHROUGH	(1 << 31)
+/* Upstream Linux uses (1ULL << 37) for FUSE_PASSTHROUGH */
 #define FUSE_NO_EXPORT_SUPPORT	(1ULL << 38)
 #define FUSE_HAS_RESEND		(1ULL << 39)
 /* Obsolete alias for FUSE_DIRECT_IO_ALLOW_MMAP */
@@ -663,6 +665,9 @@ enum fuse_opcode {
 	FUSE_STATX		= 52,
 	FUSE_COPY_FILE_RANGE_64	= 53,
 
+	/* Android specific operations */
+	FUSE_CANONICAL_PATH     = 2016,
+
 	/* CUSE specific operations */
 	CUSE_INIT		= 4096,
 
@@ -697,6 +702,17 @@ struct fuse_entry_out {
 	uint32_t	entry_valid_nsec;
 	uint32_t	attr_valid_nsec;
 	struct fuse_attr attr;
+};
+
+#define FUSE_ACTION_KEEP        0
+#define FUSE_ACTION_REMOVE      1
+#define FUSE_ACTION_REPLACE     2
+
+struct fuse_entry_bpf_out {
+        uint64_t        backing_action;
+        uint64_t        backing_fd;
+        uint64_t        bpf_action;
+        uint64_t        bpf_fd;
 };
 
 struct fuse_forget_in {
@@ -806,7 +822,10 @@ struct fuse_create_in {
 struct fuse_open_out {
 	uint64_t	fh;
 	uint32_t	open_flags;
-	int32_t		backing_id;
+	union {
+		uint32_t	passthrough_fh;
+		int32_t		backing_id;
+	};
 };
 
 struct fuse_release_in {
@@ -831,6 +850,18 @@ struct fuse_read_in {
 	uint64_t	lock_owner;
 	uint32_t	flags;
 	uint32_t	padding;
+};
+
+struct fuse_read_out {
+	uint64_t offset;
+	uint32_t again;
+	uint32_t padding;
+};
+
+struct fuse_passthrough_out_v0 {
+	uint32_t	fd;
+	uint32_t	len;
+	void *		vec;
 };
 
 #define FUSE_COMPAT_WRITE_IN_SIZE 24
@@ -1131,6 +1162,10 @@ struct fuse_backing_map {
 #define FUSE_DEV_IOC_BACKING_OPEN	_IOW(FUSE_DEV_IOC_MAGIC, 1, \
 					     struct fuse_backing_map)
 #define FUSE_DEV_IOC_BACKING_CLOSE	_IOW(FUSE_DEV_IOC_MAGIC, 2, uint32_t)
+/* Android Passthrough ioctls */
+#define FUSE_DEV_IOC_PASSTHROUGH_OPEN_V0 _IOW(229, 1, struct fuse_passthrough_out_v0)
+#define FUSE_DEV_IOC_PASSTHROUGH_OPEN_V1 _IOW(229, 127, struct fuse_passthrough_out_v0)
+#define FUSE_DEV_IOC_PASSTHROUGH_OPEN_V2 _IOW(229, 126, uint32_t)
 
 struct fuse_lseek_in {
 	uint64_t	fh;
@@ -1241,6 +1276,39 @@ struct fuse_supp_groups {
  * Size of the ring buffer header
  */
 #define FUSE_URING_IN_OUT_HEADER_SZ 128
+
+#define FUSE_MAX_IN_ARGS 5
+#define FUSE_MAX_OUT_ARGS 3
+
+/** Export fuse_args only for bpf */
+struct fuse_bpf_in_arg {
+	uint32_t	size;
+	uint32_t	offset;
+};
+
+struct fuse_bpf_arg {
+	uint32_t	size;
+	uint32_t	padding;
+	uint64_t	offset;
+};
+
+#define FUSE_BPF_FORCE (1 << 0)
+#define FUSE_BPF_OUT_ARGVAR (1 << 6)
+
+struct fuse_bpf_args {
+	uint32_t		num_in_args;
+	uint32_t		num_out_args;
+	struct fuse_bpf_in_arg in_args[FUSE_MAX_IN_ARGS];
+	struct fuse_bpf_arg out_args[FUSE_MAX_OUT_ARGS];
+};
+
+#define FUSE_BPF_USER_FILTER    1
+#define FUSE_BPF_BACKING        2
+#define FUSE_BPF_POST_FILTER    4
+
+#define FUSE_OPCODE_FILTER      0x0ffff
+#define FUSE_PREFILTER          0x10000
+#define FUSE_POSTFILTER         0x20000
 #define FUSE_URING_OP_IN_OUT_SZ 128
 
 /* Used as part of the fuse_uring_req_header */

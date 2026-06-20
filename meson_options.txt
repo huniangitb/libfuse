@@ -1,22 +1,22 @@
-option('disable-mtab', type : 'boolean', value : false,
+option('disable-mtab', type : 'boolean', value : true,
        description: 'Disable and ignore usage of /etc/mtab')
 
 option('udevrulesdir', type : 'string', value : '',
        description: 'Where to install udev rules (if empty, query pkg-config(1))')
 
-option('initscriptdir', type : 'string', value : '/etc/init.d/',
+option('initscriptdir', type : 'string', value : '',
        description: 'Init script installation location (if empty, disable init script installation)')
 
-option('utils', type : 'boolean', value : true,
+option('utils', type : 'boolean', value : false,
        description: 'Whether or not to build and install helper programs')
 
-option('examples', type : 'boolean', value : true,
+option('examples', type : 'boolean', value : false,
        description: 'Whether or not to build example programs')
 
-option('useroot', type : 'boolean', value : true,
+option('useroot', type : 'boolean', value : false,
        description: 'Set owner and setuid bits on installed files')
 
-option('tests', type : 'boolean', value : true,
+option('tests', type : 'boolean', value : false,
        description: 'Compile the test files')
 
 option('disable-libc-symbol-version', type : 'boolean', value : false,
@@ -28,4 +28,4 @@ option('enable-usdt', type : 'boolean', value : false,
 option('enable-io-uring', type: 'boolean', value: true,
        description: 'Enable fuse-over-io-uring support')
 
-option('enable-native', type: 'boolean', value: true, description: 'Optimize for current CPU architecture')
+option('enable-native', type: 'boolean', value: false, description: 'Optimize for current CPU architecture')

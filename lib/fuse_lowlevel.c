@@ -492,6 +492,8 @@ static void fill_open(struct fuse_open_out *arg,
 		arg->backing_id = f->backing_id;
 		arg->open_flags |= FOPEN_PASSTHROUGH;
 	}
+	if (f->passthrough_fh > 0)
+		arg->passthrough_fh = f->passthrough_fh;
 	if (f->direct_io)
 		arg->open_flags |= FOPEN_DIRECT_IO;
 	if (f->keep_cache)
@@ -556,6 +558,82 @@ int fuse_reply_attr(fuse_req_t req, const struct stat *attr,
 int fuse_reply_readlink(fuse_req_t req, const char *linkname)
 {
 	return send_reply_ok(req, linkname, strlen(linkname));
+}
+
+int fuse_reply_canonical_path(fuse_req_t req, const char *path)
+{
+	/* The kernel expects a buffer containing the null terminator */
+	return send_reply_ok(req, path, strlen(path) + 1);
+}
+
+/* Passthrough API version detection */
+enum {
+	FUSE_PASSTHROUGH_API_UNAVAILABLE,
+	FUSE_PASSTHROUGH_API_V0,
+	FUSE_PASSTHROUGH_API_V1,
+	FUSE_PASSTHROUGH_API_V2,
+	FUSE_PASSTHROUGH_API_STABLE,
+};
+
+/*
+ * Requests the FUSE passthrough feature to be enabled on a specific file.
+ * Returns an identifier that must be used as backing_id when replying
+ * to open/create_open requests.
+ */
+int fuse_passthrough_enable(fuse_req_t req, unsigned int fd)
+{
+	static int passthrough_version = FUSE_PASSTHROUGH_API_STABLE;
+	int ret = 0;
+
+	/* Use upstream passthrough if available */
+	{
+		struct fuse_backing_map map = { .fd = (int)fd };
+		ret = ioctl(req->se->fd, FUSE_DEV_IOC_BACKING_OPEN, &map);
+		if (ret > 0)
+			return ret;
+	}
+
+	/* Fall back to Android passthrough ioctls */
+	switch (passthrough_version) {
+	case FUSE_PASSTHROUGH_API_STABLE:
+		passthrough_version = FUSE_PASSTHROUGH_API_V2;
+		/* fall through */
+	case FUSE_PASSTHROUGH_API_V2: {
+		ret = ioctl(req->se->fd, FUSE_DEV_IOC_PASSTHROUGH_OPEN_V2, &fd);
+		if (ret == -1 && errno == ENOTTY)
+			passthrough_version = FUSE_PASSTHROUGH_API_V1;
+		else
+			break;
+		/* fall through */
+	}
+	case FUSE_PASSTHROUGH_API_V1: {
+		struct fuse_passthrough_out_v0 out = {};
+		out.fd = fd;
+		ret = ioctl(req->se->fd, FUSE_DEV_IOC_PASSTHROUGH_OPEN_V1, &out);
+		if (ret == -1 && errno == ENOTTY)
+			passthrough_version = FUSE_PASSTHROUGH_API_V0;
+		else
+			break;
+		/* fall through */
+	}
+	case FUSE_PASSTHROUGH_API_V0: {
+		struct fuse_passthrough_out_v0 out = {};
+		out.fd = fd;
+		ret = ioctl(req->se->fd, FUSE_DEV_IOC_PASSTHROUGH_OPEN_V0, &out);
+		if (ret == -1 && errno == ENOTTY)
+			passthrough_version = FUSE_PASSTHROUGH_API_UNAVAILABLE;
+		else
+			break;
+		/* fall through */
+	}
+	default:
+		fuse_log(FUSE_LOG_ERR, "fuse: passthrough_enable: no valid API\n");
+		return -ENOTTY;
+	}
+
+	if (ret <= 0)
+		fuse_log(FUSE_LOG_ERR, "fuse: passthrough_enable: %s\n", strerror(errno));
+	return ret;
 }
 
 int fuse_passthrough_open(fuse_req_t req, int fd)
@@ -1290,6 +1368,31 @@ static void do_lookup(fuse_req_t req, const fuse_ino_t nodeid,
 {
 	_do_lookup(req, nodeid, NULL, inarg);
 }
+static void do_lookup_postfilter(fuse_req_t req, const fuse_ino_t nodeid,
+				 uint32_t error_in, const void *inarg,
+				 size_t size)
+{
+	if (req->se->op.lookup_postfilter) {
+		const char *name = (const char *)inarg;
+		size_t namelen = strlen(name);
+
+		if (size != namelen + 1 + sizeof(struct fuse_entry_out)
+					+ sizeof(struct fuse_entry_bpf_out)) {
+			fuse_log(FUSE_LOG_ERR, "%s: Bad size", __func__);
+			fuse_reply_err(req, EIO);
+		} else {
+			struct fuse_entry_out *feo =
+				(struct fuse_entry_out *)(name + namelen + 1);
+			struct fuse_entry_bpf_out *febo =
+				(struct fuse_entry_bpf_out *)((char *)feo
+					+ sizeof(*feo));
+
+			req->se->op.lookup_postfilter(req, nodeid, error_in,
+						      name, feo, febo);
+		}
+	} else
+		fuse_reply_err(req, ENOSYS);
+}
 
 static void _do_forget(fuse_req_t req, const fuse_ino_t nodeid,
 		       const void *op_in, const void *in_payload)
@@ -1466,6 +1569,29 @@ static void _do_mknod(fuse_req_t req, const fuse_ino_t nodeid,
 
 	if (req->se->op.mknod)
 		req->se->op.mknod(req, nodeid, name, arg->mode, arg->rdev);
+	else
+		fuse_reply_err(req, ENOSYS);
+}
+
+static void _do_canonical_path(fuse_req_t req, const fuse_ino_t nodeid,
+				const void *op_in, const void *in_payload)
+{
+	(void)op_in;
+	(void)in_payload;
+
+	if (req->se->op.canonical_path)
+		req->se->op.canonical_path(req, nodeid);
+	else
+		fuse_reply_err(req, ENOSYS);
+}
+
+static void do_canonical_path(fuse_req_t req, const fuse_ino_t nodeid,
+				const void *inarg)
+{
+	(void)inarg;
+
+	if (req->se->op.canonical_path)
+		req->se->op.canonical_path(req, nodeid);
 	else
 		fuse_reply_err(req, ENOSYS);
 }
@@ -1950,6 +2076,26 @@ static void do_readdir(fuse_req_t req, const fuse_ino_t nodeid,
 		       const void *inarg)
 {
 	_do_readdir(req, nodeid, inarg, NULL);
+}
+static void do_readdir_postfilter(fuse_req_t req, const fuse_ino_t nodeid,
+				 uint32_t error_in, const void *inarg,
+				 size_t size)
+{
+	struct fuse_read_in *fri = (struct fuse_read_in *)inarg;
+	struct fuse_read_out *fro = (struct fuse_read_out *)(fri + 1);
+	struct fuse_dirent *dirents = (struct fuse_dirent *)(fro + 1);
+	struct fuse_file_info fi;
+
+	memset(&fi, 0, sizeof(fi));
+	fi.fh = fri->fh;
+
+	if (req->se->op.readdirpostfilter)
+		req->se->op.readdirpostfilter(req, nodeid, error_in,
+					      fri->offset, fro->offset,
+					      size - sizeof(*fri) - sizeof(*fro),
+					      dirents, &fi);
+	else
+		fuse_reply_err(req, ENOSYS);
 }
 
 static void _do_readdirplus(fuse_req_t req, const fuse_ino_t nodeid,
@@ -2688,6 +2834,20 @@ _do_init(fuse_req_t req, const fuse_ino_t nodeid, const void *op_in,
 		if (arg->max_readahead < se->conn.max_readahead)
 			se->conn.max_readahead = arg->max_readahead;
 		inargflags = arg->flags;
+
+		/*
+		 * Unpatched Android kernels using the old FUSE_PASSTHROUGH value
+		 * ((1 << 31)) may also set FUSE_INIT_EXT (bit 30), but their
+		 * fuse_init_in does not have a valid flags2 field, so reading
+		 * arg->flags2 would produce garbage in the upper 32 bits of
+		 * inargflags.  If both FUSE_INIT_EXT and the old passthrough
+		 * value are set, clear FUSE_INIT_EXT to prevent the invalid
+		 * flags2 merge.
+		 */
+		if ((inargflags & FUSE_INIT_EXT) &&
+		    (inargflags & (uint64_t)FUSE_PASSTHROUGH))
+			inargflags &= ~FUSE_INIT_EXT;
+
 		if (inargflags & FUSE_INIT_EXT)
 			inargflags = inargflags | (uint64_t) arg->flags2 << 32;
 		if (inargflags & FUSE_ASYNC_READ)
@@ -2816,7 +2976,9 @@ _do_init(fuse_req_t req, const fuse_ino_t nodeid, const void *op_in,
 		fuse_convert_to_conn_want_ext(&se->conn);
 	}
 
-	if (!want_flags_valid(se->conn.capable_ext, se->conn.want_ext)) {
+
+
+if (!want_flags_valid(se->conn.capable_ext, se->conn.want_ext)) {
 		fuse_reply_err(req, EPROTO);
 		se->error = -EPROTO;
 		fuse_session_exit(se);
@@ -3406,6 +3568,7 @@ static struct {
 	[FUSE_GETATTR]	   = { do_getattr,     "GETATTR"     },
 	[FUSE_SETATTR]	   = { do_setattr,     "SETATTR"     },
 	[FUSE_READLINK]	   = { do_readlink,    "READLINK"    },
+	[FUSE_CANONICAL_PATH] = { do_canonical_path, "CANONICAL_PATH" },
 	[FUSE_SYMLINK]	   = { do_symlink,     "SYMLINK"     },
 	[FUSE_MKNOD]	   = { do_mknod,       "MKNOD"	     },
 	[FUSE_MKDIR]	   = { do_mkdir,       "MKDIR"	     },
@@ -3453,6 +3616,17 @@ static struct {
 };
 
 static struct {
+	void (*func)( fuse_req_t, fuse_ino_t, const void *);
+	const char *name;
+} fuse_ll_prefilter_ops[] = {};
+static struct {
+	void (*func)( fuse_req_t, fuse_ino_t, uint32_t, const void *, size_t size);
+} fuse_ll_postfilter_ops[] = {
+	[FUSE_LOOKUP] = {do_lookup_postfilter},
+	[FUSE_READDIR] = {do_readdir_postfilter},
+};
+
+static struct {
 	void (*func)(fuse_req_t req, const fuse_ino_t ino, const void *op_in,
 		     const void *op_payload);
 	const char *name;
@@ -3462,6 +3636,7 @@ static struct {
 	[FUSE_GETATTR]		= { _do_getattr,	"GETATTR" },
 	[FUSE_SETATTR]		= { _do_setattr,	"SETATTR" },
 	[FUSE_READLINK]		= { _do_readlink,	"READLINK" },
+	[FUSE_CANONICAL_PATH]	= { _do_canonical_path, "CANONICAL_PATH" },
 	[FUSE_SYMLINK]		= { _do_symlink,	"SYMLINK" },
 	[FUSE_MKNOD]		= { _do_mknod,		"MKNOD" },
 	[FUSE_MKDIR]		= { _do_mkdir,		"MKDIR" },
@@ -3575,6 +3750,22 @@ static const char *opname(enum fuse_opcode opcode)
 		return fuse_ll_ops[opcode].name;
 }
 
+static const char *opfiltername(int filter)
+{
+	switch (filter) {
+	case 0:
+		return "NONE";
+	case FUSE_PREFILTER:
+		return "FUSE_PREFILTER";
+	case FUSE_POSTFILTER:
+		return "FUSE_POSTFILTER";
+	case FUSE_PREFILTER | FUSE_POSTFILTER:
+		return "FUSE_PREFILTER | FUSE_POSTFILTER";
+	default:
+		return "???";
+	}
+}
+
 static int fuse_ll_copy_from_pipe(struct fuse_bufvec *dst,
 				  struct fuse_bufvec *src)
 {
@@ -3631,13 +3822,18 @@ void fuse_session_process_buf_internal(struct fuse_session *se,
 		in = buf->mem;
 	}
 
+	/* Clean up opcode most significant bits used by FUSE BPF */
+	int opcode_filter = in->opcode & ~FUSE_OPCODE_FILTER;
+	in->opcode &= FUSE_OPCODE_FILTER;
+
 	trace_request_process(in->opcode, in->unique);
 
 	if (se->debug) {
 		fuse_log(FUSE_LOG_DEBUG,
-			"dev unique: %llu, opcode: %s (%i), nodeid: %llu, insize: %zu, pid: %u\n",
+			"dev unique: %llu, opcode: %s (%i), opcode filter: %s (%i), nodeid: %llu, insize: %zu, pid: %u\n",
 			(unsigned long long) in->unique,
 			opname((enum fuse_opcode) in->opcode), in->opcode,
+						opfiltername(opcode_filter), opcode_filter,
 			(unsigned long long) in->nodeid, buf->size, in->pid);
 	}
 
@@ -3713,8 +3909,25 @@ void fuse_session_process_buf_internal(struct fuse_session *se,
 		do_write_buf(req, in->nodeid, inarg, buf);
 	else if (in->opcode == FUSE_NOTIFY_REPLY)
 		do_notify_reply(req, in->nodeid, inarg, buf);
-	else
+	else if (!opcode_filter)
 		fuse_ll_ops[in->opcode].func(req, in->nodeid, inarg);
+	else if (opcode_filter == FUSE_PREFILTER
+		&& in->opcode < (sizeof(fuse_ll_prefilter_ops)
+			/ sizeof(fuse_ll_prefilter_ops[0]))
+		&& fuse_ll_prefilter_ops[in->opcode].func)
+		fuse_ll_prefilter_ops[in->opcode].func(req, in->nodeid, inarg);
+	else if (opcode_filter == FUSE_POSTFILTER
+		&& in->opcode < (sizeof(fuse_ll_postfilter_ops)
+			/ sizeof(fuse_ll_postfilter_ops[0]))
+		&& fuse_ll_postfilter_ops[in->opcode].func)
+		fuse_ll_postfilter_ops[in->opcode].func(
+			req, in->nodeid, 0, inarg,
+			buf->size - sizeof(struct fuse_in_header));
+	else {
+		fuse_log(FUSE_LOG_ERR, "Bad opcode");
+		err = ENOSYS;
+		goto reply_err;
+	}
 
 out_free:
 	free(mbuf);

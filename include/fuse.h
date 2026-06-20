@@ -18,7 +18,14 @@
 
 #include "fuse_common.h"
 
+/* Forward declaration for bpf_setup callback */
+struct fuse_entry_param;
+
 #include <fcntl.h>
+
+/* Forward declaration for fuse_context.req (defined in fuse_lowlevel.h) */
+struct fuse_req;
+typedef struct fuse_req *fuse_req_t;
 #include <time.h>
 #include <sys/types.h>
 #include <sys/stat.h>
@@ -867,6 +874,19 @@ struct fuse_operations {
 	 */
 	int (*statx)(const char *path, int flags, int mask, struct statx *stxbuf,
 		     struct fuse_file_info *fi);
+
+	/**
+	 * Setup FUSE BPF backing for a looked-up path.
+	 *
+	 * Called after a successful lookup/before replying. Fill in
+	 * e->backing_action, e->backing_fd, e->bpf_action, e->bpf_fd
+	 * to enable kernel-side BPF bypass.
+	 *
+	 * @param path the full virtual path being looked up
+	 * @param e    entry param to fill BPF fields into
+	 * @return 0 on success, -errno to skip BPF
+	 */
+	int (*bpf_setup)(const char *path, struct fuse_entry_param *e);
 };
 
 /** Extra context that may be needed by some filesystems
@@ -892,6 +912,9 @@ struct fuse_context {
 
 	/** Umask of the calling process */
 	mode_t umask;
+
+	/** The fuse request handle (for passthrough etc.) */
+	fuse_req_t req;
 };
 
 /**
