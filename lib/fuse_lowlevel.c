@@ -1,4 +1,3 @@
-#include <malloc.h>
 /*
   FUSE: Filesystem in Userspace
   Copyright (C) 2001-2007  Miklos Szeredi <miklos@szeredi.hu>
@@ -11,6 +10,7 @@
 */
 
 #define _GNU_SOURCE
+#include <malloc.h>
 #include <fcntl.h>
 #include <unistd.h>
 int pipe2(int fds[2], int flags);

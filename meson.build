@@ -154,7 +154,6 @@ private_cfg.set('HAVE_STRUCT_STAT_ST_ATIMESPEC',
                   prefix: include_default + '#include <sys/stat.h>',
                   args: args_default))
 
-private_cfg.set('USDT_ENABLED', get_option('enable-usdt'))
 
 # Check for liburing with SQE128 support
 code = '''
@@ -190,13 +189,6 @@ add_project_arguments('-D_REENTRANT', '-DHAVE_LIBFUSE_PRIVATE_CONFIG_H', '-D_GNU
                      '-Wno-sign-compare', '-Wmissing-declarations',
                      '-Wwrite-strings', '-fno-strict-aliasing', language: 'cpp')
 
-# Native optimization (Option 3)
-if get_option('enable-native')
-    native_flags = ['-march=native', '-mtune=native']
-    # Check if compiler supports these flags before adding
-    add_project_arguments(cc.get_supported_arguments(native_flags), language: ['c', 'cpp'])
-    message('Native CPU optimization enabled')
-endif
 
 # Some (stupid) GCC versions warn about unused return values even when they are
 # casted to void. This makes -Wunused-result pretty useless, since there is no
@@ -322,17 +314,6 @@ thread_dep = dependency('threads')
 # Read build files from sub-directories
 #
 subdirs = [ 'lib', 'include']
-if get_option('utils') and not platform.endswith('bsd') and platform != 'dragonfly'
-  subdirs += [ 'util', 'doc' ]
-endif
-
-if get_option('examples')
-  subdirs += 'example'
-endif
-
-if get_option('tests')
-  subdirs += 'test'
-endif
 
 foreach n : subdirs
     subdir(n)
